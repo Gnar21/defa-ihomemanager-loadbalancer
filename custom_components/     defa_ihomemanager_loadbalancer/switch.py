@@ -29,7 +29,6 @@ class EcoModeSwitch(CoordinatorEntity, SwitchEntity):
         self.coordinator.settings.eco_mode = True
         new_opts = dict(self.entry.options)
         new_opts["eco_mode"] = True
-        # Persist using config entry options storage. [7](https://docs.chipkin.com/articles/modbus-addressing-register-reference/)[8](https://community.home-assistant.io/t/how-to-write-sensor-data-from-ha-to-modbus/537390)
         self.hass.config_entries.async_update_entry(self.entry, options=new_opts)
         await self.coordinator.async_request_refresh()
 
@@ -37,7 +36,5 @@ class EcoModeSwitch(CoordinatorEntity, SwitchEntity):
         self.coordinator.settings.eco_mode = False
         new_opts = dict(self.entry.options)
         new_opts["eco_mode"] = False
-        # Persist using config entry options storage. [7](https://docs.chipkin.com/articles/modbus-addressing-register-reference/)[8](https://community.home-assistant.io/t/how-to-write-sensor-data-from-ha-to-modbus/537390)
         self.hass.config_entries.async_update_entry(self.entry, options=new_opts)
         await self.coordinator.async_request_refresh()
-``
