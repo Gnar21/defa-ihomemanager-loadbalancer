@@ -6,9 +6,6 @@ import inspect
 import pymodbus
 from pymodbus.client import AsyncModbusTcpClient
 
-_LOGGER = logging.getLogger(__name__)
-
-
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
@@ -16,14 +13,22 @@ from .const import DOMAIN
 from .coordinator import LoadBalancerCoordinator, Settings
 from .modbus_client import AsyncModbusEndpointClient, ModbusEndpoint
 
+_LOGGER = logging.getLogger(__name__)
+
 PLATFORMS = ["sensor", "number", "switch"]
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    
-_LOGGER.warning("Using pymodbus version (HA Core runtime): %s", pymodbus.__version__)
-_LOGGER.warning("read_input_registers signature: %s", inspect.signature(AsyncModbusTcpClient.read_input_registers))
-_LOGGER.warning("write_registers signature: %s", inspect.signature(AsyncModbusTcpClient.write_registers))
+    # ✅ Debug: logga PyModbus-version + signaturer i *HA Core runtime*
+    _LOGGER.warning("Using pymodbus version (HA Core runtime): %s", pymodbus.__version__)
+    _LOGGER.warning(
+        "read_input_registers signature: %s",
+        inspect.signature(AsyncModbusTcpClient.read_input_registers),
+    )
+    _LOGGER.warning(
+        "write_registers signature: %s",
+        inspect.signature(AsyncModbusTcpClient.write_registers),
+    )
 
     ihm = AsyncModbusEndpointClient(
         ModbusEndpoint(
