@@ -26,7 +26,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
     )
 
-    # Load persistent options (saved by OptionsFlow / Number entities)
     opts = entry.options
     settings = Settings(
         fuse_a=opts.get("fuse_a", 20.0),
@@ -34,11 +33,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         normal_max_a=opts.get("normal_max_a", 16.0),
         min_a=opts.get("min_a", 6.0),
         eco_grid_limit_a=opts.get("eco_grid_limit_a", 2.0),
-        grid_power_sign=opts.get("grid_power_sign", 1),
-        eco_mode=opts.get("eco_mode", False),
+        grid_power_sign=int(opts.get("grid_power_sign", 1)),
+        eco_mode=bool(opts.get("eco_mode", False)),
         deadband_a=opts.get("deadband_a", 1.0),
         ramp_a_per_min=opts.get("ramp_a_per_min", 2.0),
-        min_up_interval_s=opts.get("min_up_interval_s", 60),
+        min_up_interval_s=int(opts.get("min_up_interval_s", 60)),
     )
 
     coordinator = LoadBalancerCoordinator(hass, ihm, defa, settings)
@@ -56,8 +55,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        data = hass.data[DOMAIN].pop(entry.entry_id)
-        coordinator = data["coordinator"]
-        await coordinator._ihm.async_close()
-        await coordinator._defa.async_close()
+        data = hass.data[DOMAIN].pop(entry.entry_id, {})
+        coordinator = data.get("coordinator")
+        if coordinator:
+            await coordinator.close()
     return unload_ok
