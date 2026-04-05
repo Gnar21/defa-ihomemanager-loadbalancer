@@ -1,12 +1,8 @@
-import logging
-
-_LOGGER = logging.getLogger(__name__)
-``
-
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
+import logging
 import time
 
 from homeassistant.core import HomeAssistant
@@ -32,6 +28,8 @@ from .modbus_client import (
     u32_big_endian,
 )
 
+_LOGGER = logging.getLogger(__name__)
+
 
 @dataclass
 class Settings:
@@ -40,23 +38,16 @@ class Settings:
     normal_max_a: float = DEFAULT_NORMAL_MAX_A
     min_a: float = DEFAULT_MIN_A
 
-    # ECO per fas (ställbar)
     eco_grid_limit_a: float = DEFAULT_ECO_GRID_LIMIT_A
     grid_power_sign: int = DEFAULT_GRID_POWER_SIGN
     eco_mode: bool = False
 
-    # Anti-fladder
     deadband_a: float = DEFAULT_DEADBAND_A
     ramp_a_per_min: float = DEFAULT_RAMP_A_PER_MIN
     min_up_interval_s: int = DEFAULT_MIN_UP_INTERVAL_S
 
 
 class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
-    """Poll iHomeManager + DEFA and apply control to DEFA.
-
-    DataUpdateCoordinator used to avoid redundant polling across entities. [4](https://www.home-assistant.io/integrations/modbus/)
-    """
-
     def __init__(
         self,
         hass: HomeAssistant,
@@ -66,6 +57,7 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
     ) -> None:
         super().__init__(
             hass,
+            _LOGGER,  # ✅ REQUIRED
             name="DEFA+iHomeManager Load Balancer",
             update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
         )
@@ -76,15 +68,16 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
         self._last_sent_a: float = 0.0
         self._last_up_ts: float = 0.0
 
-    async def _async_update_data(self) -> dict:
-        """Fetch data, compute targets, apply anti-fladder, write to DEFA."""
-        try:
-            # =========================
-            # iHomeManager reads
-            # =========================
+    async def close(self) -> None:
+        await self._ihm.async_close()
+        await self._defa.async_close()
 
-            # Voltages 8555-8557, factor 0.1 V. (We use reg-1 addressing elsewhere in config/yaml;
-            # in this integration we read the addresses we have chosen to use.)
+    async def _async_update_data(self) -> dict:
+        try:
+            # --------------------------
+            # iHomeManager: voltages
+            # 8555-8557 (we use reg-1 addresses here as per earlier setup)
+            # --------------------------
             v_regs = await self._ihm.read_input_registers(8554, 3)
             if v_regs.isError():
                 raise UpdateFailed(f"iHomeManager voltage read error: {v_regs}")
@@ -93,7 +86,9 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
             v_l3 = u16(v_regs.registers, 2) * 0.1
             v_avg = max((v_l1 + v_l2 + v_l3) / 3.0, 1.0)
 
-            # Phase active power 8559-8564 U32 W (hybrid low-word first). [5](https://hacs.xyz/docs/publish/start/)
+            # --------------------------
+            # iHomeManager: phase active power (8559-8564 U32 W)
+            # --------------------------
             p1 = await self._ihm.read_input_registers(8558, 2)
             p2 = await self._ihm.read_input_registers(8560, 2)
             p3 = await self._ihm.read_input_registers(8562, 2)
@@ -103,24 +98,22 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
             p_l2 = float(u32_hybrid_low_word_first(p2.registers, 0))
             p_l3 = float(u32_hybrid_low_word_first(p3.registers, 0))
 
-            # Grid meter active power (8157 S32, 0.01 kW). [5](https://hacs.xyz/docs/publish/start/)
+            # --------------------------
+            # iHomeManager: grid meter active power (8157 S32, 0.01 kW) -> address 8156
+            # --------------------------
             gp = await self._ihm.read_input_registers(8156, 2)
             if gp.isError():
                 raise UpdateFailed("iHomeManager grid power read error")
             grid_kw = s32_hybrid_low_word_first(gp.registers, 0) * 0.01
             grid_kw *= int(self.settings.grid_power_sign)
 
-            # =========================
-            # Extra sensors (EXACTLY as you pasted)
-            # =========================
-
-            # Total Purchased power @ address 8175, uint32, swap: word, scale 0.1 (kWh)
-            tp = await self._ihm.read_input_registers(8175, 2)
-            # Total feed-in power @ address 8177, uint32, swap: word, scale 0.1 (kWh)
-            tf = await self._ihm.read_input_registers(8177, 2)
-            # Total active power @ address 8156, int32, swap: word, scale 0.01 (kW)
-            ta = await self._ihm.read_input_registers(8156, 2)
-
+            # --------------------------
+            # EXTRA sensors (som du ville ha)
+            # address, data_type, scale som du la in
+            # --------------------------
+            tp = await self._ihm.read_input_registers(8175, 2)  # Total Purchased power (U32) scale 0.1 kWh
+            tf = await self._ihm.read_input_registers(8177, 2)  # Total feed-in power (U32) scale 0.1 kWh
+            ta = await self._ihm.read_input_registers(8156, 2)  # Total active power (S32) scale 0.01 kW (din adress)
             if tp.isError() or tf.isError() or ta.isError():
                 raise UpdateFailed("iHomeManager extra sensors read error")
 
@@ -128,11 +121,9 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
             total_feed_in_power = u32_hybrid_low_word_first(tf.registers, 0) * 0.1
             total_active_power = s32_hybrid_low_word_first(ta.registers, 0) * 0.01
 
-            # =========================
-            # DEFA reads (EV currents)
-            # =========================
-
-            # Currents are uint32 mA at 293/296/299; scale to A. [6](https://developers.home-assistant.io/docs/creating_integration_manifest/)
+            # --------------------------
+            # DEFA: EV currents per phase (mA -> A)
+            # --------------------------
             i1 = await self._defa.read_input_registers(293, 2)
             i2 = await self._defa.read_input_registers(296, 2)
             i3 = await self._defa.read_input_registers(299, 2)
@@ -143,10 +134,9 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
             ev_i_l2 = u32_big_endian(i2.registers, 0) * 0.001
             ev_i_l3 = u32_big_endian(i3.registers, 0) * 0.001
 
-            # =========================
-            # Compute load / headroom
-            # =========================
-
+            # --------------------------
+            # Calculate grid currents per phase ~ P/V
+            # --------------------------
             grid_i_l1 = p_l1 / max(v_l1, 1.0)
             grid_i_l2 = p_l2 / max(v_l2, 1.0)
             grid_i_l3 = p_l3 / max(v_l3, 1.0)
@@ -157,8 +147,6 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
 
             fuse = self.settings.fuse_a
             margin = self.settings.margin_a
-
-            # Use min over phases because DEFA limits per phase. [6](https://developers.home-assistant.io/docs/creating_integration_manifest/)
             headroom = min(
                 fuse - margin - other_l1,
                 fuse - margin - other_l2,
@@ -170,7 +158,7 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
             if normal_target < self.settings.min_a:
                 normal_target = 0.0
 
-            # ECO target (per phase): export -> A/phase + eco_grid_limit_a
+            # ECO target (per fas)
             export_kw = max(-grid_kw, 0.0)
             solar_a_per_phase = (export_kw * 1000.0) / (3.0 * v_avg)
             eco_limit = solar_a_per_phase + self.settings.eco_grid_limit_a
@@ -181,44 +169,32 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
             desired = eco_target if self.settings.eco_mode else normal_target
             applied = self._apply_antifladder(desired)
 
-            # =========================
+            # --------------------------
             # Write to DEFA: alive + eMS max current
-            # =========================
+            # alive 2008-2009 write uint32=1; eMS max current 2000-2001 mA
+            # --------------------------
+            await self._defa.write_registers(2008, [0, 1])  # alive [9](https://github.com/hacs)
 
-            # Alive register 2008-2009: write uint32=1. [6](https://developers.home-assistant.io/docs/creating_integration_manifest/)
-            await self._defa.write_registers(2008, [0, 1])
-
-            # eMS max current 2000-2001: uint32 mA, big-endian. [6](https://developers.home-assistant.io/docs/creating_integration_manifest/)
             ma = int(round(applied * 1000.0))
             hi = (ma >> 16) & 0xFFFF
             lo = ma & 0xFFFF
-            await self._defa.write_registers(2000, [hi, lo])
+            await self._defa.write_registers(2000, [hi, lo])  # eMS max current [9](https://github.com/hacs)
 
             return {
-                "v_l1": v_l1,
-                "v_l2": v_l2,
-                "v_l3": v_l3,
-                "p_l1": p_l1,
-                "p_l2": p_l2,
-                "p_l3": p_l3,
-                "grid_kw": grid_kw,
-                "export_kw": export_kw,
                 "grid_i_l1": grid_i_l1,
                 "grid_i_l2": grid_i_l2,
                 "grid_i_l3": grid_i_l3,
                 "ev_i_l1": ev_i_l1,
                 "ev_i_l2": ev_i_l2,
                 "ev_i_l3": ev_i_l3,
-                "other_l1": other_l1,
-                "other_l2": other_l2,
-                "other_l3": other_l3,
                 "headroom": headroom,
-                "target_normal": normal_target,
-                "target_eco": eco_target,
+                "export_kw": export_kw,
                 "desired": desired,
                 "applied": applied,
+                "target_normal": normal_target,
+                "target_eco": eco_target,
 
-                # Extra sensors - keys intentionally match your pasted unique_id semantics
+                # Extra sensors:
                 "total_purchased_power": total_purchased_power,
                 "total_feed-in_power": total_feed_in_power,
                 "total_active_power": total_active_power,
@@ -228,11 +204,6 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
             raise UpdateFailed(err) from err
 
     def _apply_antifladder(self, desired: float) -> float:
-        """Anti-fladder:
-        - Ignore small changes (deadband)
-        - Decrease immediately (fuse protection)
-        - Increase slowly (ramp) and not too often (min_up_interval_s)
-        """
         deadband = float(self.settings.deadband_a)
         ramp_per_min = float(self.settings.ramp_a_per_min)
         min_up_s = int(self.settings.min_up_interval_s)
@@ -244,7 +215,7 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
         if abs(diff) < deadband:
             return current
 
-        # Down: immediate
+        # Down: immediate (säkringsskydd)
         if diff < 0:
             self._last_sent_a = max(desired, 0.0)
             return self._last_sent_a
@@ -253,7 +224,7 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
         if (now - self._last_up_ts) < min_up_s:
             return current
 
-        # Up: ramp assuming 10s coordinator interval => 6 steps per minute
+        # Up: ramp (10s interval => 6 steg per minut)
         step = max(ramp_per_min / 6.0, 0.1)
         new_val = min(current + step, desired)
 
