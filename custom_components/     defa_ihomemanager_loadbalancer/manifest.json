@@ -1,1 +1,14 @@
+{
+  "domain": "defa_ihomemanager_loadbalancer",
+  "name": "DEFA + iHomeManager Load Balancer",
+  "version": "1.0.0",
+  "documentation": "https://github.com/Gnar21/defa-ihomemanager-loadbalancer",
+  "issue_tracker": "https://github.com/Gnar21/defa-ihomemanager-loadbalancer/issues",
+  "codeowners": ["@Gnar21"],
+  "config_flow": true,
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "requirements": ["pymodbus>=3.6.0,<4.0.0"],
+  "loggers": ["pymodbus"]
+}
 
