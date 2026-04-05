@@ -1,1 +1,10 @@
-
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Configure",
+        "description": "Enter Modbus TCP connection details for iHomeManager and DEFA."
+      }
+    }
+  }
+}
