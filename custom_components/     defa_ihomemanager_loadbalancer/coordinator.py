@@ -1,3 +1,8 @@
+import logging
+
+_LOGGER = logging.getLogger(__name__)
+``
+
 from __future__ import annotations
 
 from dataclasses import dataclass
