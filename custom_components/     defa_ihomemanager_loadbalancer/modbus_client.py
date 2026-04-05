@@ -68,4 +68,4 @@ def s32_hybrid_low_word_first(regs: list[int], idx: int = 0) -> int:
     if val & 0x80000000:
         val -= 0x100000000
     return val
-``
+
