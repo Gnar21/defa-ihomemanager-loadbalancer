@@ -32,7 +32,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input=None):
         if user_input is None:
             return self.async_show_form(step_id="user", data_schema=DATA_SCHEMA)
-        return self.async_create_entry(title="DEFA + iHomeManager Load Balancer", data=user_input)
+
+        return self.async_create_entry(
+            title="DEFA + iHomeManager Load Balancer",
+            data=user_input,
+        )
 
 
 class OptionsFlowHandler(config_entries.OptionsFlow):
@@ -49,7 +53,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional("normal_max_a", default=opts.get("normal_max_a", DEFAULT_NORMAL_MAX_A)): vol.Coerce(float),
                 vol.Optional("min_a", default=opts.get("min_a", DEFAULT_MIN_A)): vol.Coerce(float),
 
-                # Eco per phase (configurable)
+                # ECO per fas (ställbar)
                 vol.Optional("eco_grid_limit_a", default=opts.get("eco_grid_limit_a", DEFAULT_ECO_GRID_LIMIT_A)): vol.Coerce(float),
                 vol.Optional("grid_power_sign", default=opts.get("grid_power_sign", DEFAULT_GRID_POWER_SIGN)): vol.In([1, -1]),
 
