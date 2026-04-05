@@ -219,4 +219,4 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
         self._last_sent_a = new_val
         self._last_up_ts = now
         return new_val
-``
+
