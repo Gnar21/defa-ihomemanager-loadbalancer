@@ -5,8 +5,6 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 
-
-# key, friendly_name, unit
 SENSORS = [
     ("grid_i_l1", "Grid current L1", "A"),
     ("grid_i_l2", "Grid current L2", "A"),
@@ -21,18 +19,16 @@ SENSORS = [
     ("target_normal", "Target (Normal)", "A"),
     ("target_eco", "Target (Eco)", "A"),
 
-    # ✅ Extra iHomeManager sensors (EXACT keys from your pasted YAML)
+    # Extra sensors
     ("total_purchased_power", "Total Purchased power", "kWh"),
     ("total_feed-in_power", "Total feed-in power", "kWh"),
-    ("total_active_power", "Total active power", "kw"),
+    ("total_active_power", "Total active power", "kW"),
 ]
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    async_add_entities(
-        [LBsensor(coordinator, entry.entry_id, key, name, unit) for key, name, unit in SENSORS]
-    )
+    async_add_entities([LBsensor(coordinator, entry.entry_id, k, n, u) for k, n, u in SENSORS])
 
 
 class LBsensor(CoordinatorEntity, SensorEntity):
@@ -40,7 +36,6 @@ class LBsensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
         self._key = key
         self._attr_name = name
-        # unique_id must be unique per config entry; HA recommends unique IDs for registry. [1](https://mantikor.github.io/components/switch.modbus/)
         self._attr_unique_id = f"{entry_id}_{key}"
         self._attr_native_unit_of_measurement = unit
 
@@ -49,4 +44,4 @@ class LBsensor(CoordinatorEntity, SensorEntity):
         val = self.coordinator.data.get(self._key)
         if val is None:
             return None
-
+        return round(val, 3) if isinstance(val, float) else val
