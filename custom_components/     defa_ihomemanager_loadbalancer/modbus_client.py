@@ -2,26 +2,28 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Optional
+import logging
+from typing import Optional, Any, Callable
 
 from pymodbus.client import AsyncModbusTcpClient
+
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
 class ModbusEndpoint:
     host: str
     port: int
-    unit: int  # mapped to device_id in this HA Core pymodbus build
+    unit: int  # unit id / slave id / device_id depending on pymodbus build
 
 
 class AsyncModbusEndpointClient:
     """Single-connection Modbus TCP client with serialized calls.
 
-    - Keeps one TCP client per endpoint
-    - Serializes calls with a lock (PyModbus client is not thread-safe) [2](https://developers.home-assistant.io/docs/architecture/devices-and-services/)
-    - Uses HA Core PyModbus signatures:
-        read_input_registers(address, *, count=..., device_id=...)
-        write_registers(address, values, *, device_id=...)
+    - Keeps one TCP client per endpoint.
+    - Serializes calls with a lock (avoid concurrent requests on same socket).
+    - Handles pymodbus kwarg differences for unit id (device_id vs slave vs unit).
+      (This is needed because pymodbus changed identifiers across versions.) [1](https://community.home-assistant.io/t/managing-pymodbus-versions-in-custom-integrations/823773)
     """
 
     def __init__(self, endpoint: ModbusEndpoint) -> None:
@@ -30,44 +32,86 @@ class AsyncModbusEndpointClient:
         self._lock = asyncio.Lock()
 
     async def async_connect(self) -> None:
+        """Ensure we have a connected client."""
         if self._client is not None and getattr(self._client, "connected", False):
             return
+
         self._client = AsyncModbusTcpClient(host=self._ep.host, port=self._ep.port)
         await self._client.connect()
 
     async def async_close(self) -> None:
+        """Close and drop the client."""
         if self._client is not None:
-            await self._client.close()
-        self._client = None
+            try:
+                await self._client.close()
+            finally:
+                self._client = None
+
+    async def _call_with_unit_kw(
+        self,
+        fn: Callable[..., Any],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ):
+        """Call a pymodbus function using the correct unit keyword.
+
+        We try device_id first (newer pymodbus / HA builds), then slave, then unit.
+        Only one will match the installed pymodbus signature. [1](https://community.home-assistant.io/t/managing-pymodbus-versions-in-custom-integrations/823773)
+        """
+        unit_value = self._ep.unit
+
+        # IMPORTANT: do NOT pass any of these unless we're trying them,
+        # because passing the wrong one causes the exact error you're seeing.
+        tries = ("device_id", "slave", "unit")
+
+        last_err: Exception | None = None
+        for key in tries:
+            try:
+                call_kwargs = dict(kwargs)
+                call_kwargs[key] = unit_value
+                return await fn(*args, **call_kwargs)
+            except TypeError as e:
+                # wrong kwarg for this pymodbus build => try next
+                last_err = e
+                continue
+
+        # If we get here, none of the known keywords worked
+        raise last_err if last_err is not None else TypeError("Unknown Modbus unit kwarg mismatch")
 
     async def read_input_registers(self, address: int, count: int):
         async with self._lock:
             await self.async_connect()
             assert self._client is not None
-            return await self._client.read_input_registers(
-                address,
-                count=count,               # keyword-only
-                device_id=self._ep.unit,   # unit/slave id in your build
+
+            return await self._call_with_unit_kw(
+                self._client.read_input_registers,
+                address=address,
+                count=count,
             )
 
     async def read_holding_registers(self, address: int, count: int):
         async with self._lock:
             await self.async_connect()
             assert self._client is not None
-            return await self._client.read_holding_registers(
-                address,
+
+            return await self._call_with_unit_kw(
+                self._client.read_holding_registers,
+                address=address,
                 count=count,
-                device_id=self._ep.unit,
             )
 
     async def write_registers(self, address: int, values: list[int]):
         async with self._lock:
             await self.async_connect()
             assert self._client is not None
-            return await self._client.write_registers(
-                address,
-                values,                    # positional values (per signature)
-                device_id=self._ep.unit,   # keyword-only
+
+            # Some pymodbus builds accept values as positional, others as keyword;
+            # using keyword is usually safest.
+            return await self._call_with_unit_kw(
+                self._client.write_registers,
+                address=address,
+                values=values,
             )
 
 
