@@ -31,7 +31,7 @@ from .modbus_client import (
 _LOGGER = logging.getLogger(__name__)
 
 
-def _ensure_ok(resp, label: str):
+def _ensure_ok(resp, label: str) -> None:
     """Raise UpdateFailed with a useful message if a modbus response is error."""
     if resp is None:
         raise UpdateFailed(f"{label}: response is None")
@@ -60,7 +60,7 @@ class Settings:
 class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
     """Poll iHomeManager + DEFA and apply limit to DEFA.
 
-    DataUpdateCoordinator is the recommended HA pattern for polling shared data. [1](https://github.com/NoTwistedHere/Random-Roblox-Utils/blob/main/Loadstrings.md)
+    DataUpdateCoordinator is the recommended HA pattern for polling shared data.
     """
 
     def __init__(
@@ -70,12 +70,13 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
         defa: AsyncModbusEndpointClient,
         settings: Settings,
     ) -> None:
-       super().__init__(
-    hass=hass,
-    logger=_LOGGER,
-    name="DEFA+iHomeManager Load Balancer",
-    update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
-)
+        super().__init__(
+            hass=hass,
+            logger=_LOGGER,
+            name="DEFA+iHomeManager Load Balancer",
+            update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
+        )
+
         self._ihm = ihm
         self._defa = defa
         self.settings = settings
@@ -125,11 +126,11 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
 
             # --------------------------
             # Extra iHomeManager sensors (optional, but we try)
-            # Addresses exactly as you pasted earlier
             # --------------------------
             total_purchased_power = None
             total_feed_in_power = None
             total_active_power = None
+
             try:
                 tp = await self._ihm.read_input_registers(8175, 2)
                 _ensure_ok(tp, "iHomeManager Total Purchased power @8175 count=2")
@@ -146,7 +147,6 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
 
             # --------------------------
             # DEFA reads (best-effort)
-            # If this fails, we set EV currents = 0 so iHM sensors still update
             # --------------------------
             ev_i_l1 = 0.0
             ev_i_l2 = 0.0
@@ -166,7 +166,9 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
                 ev_i_l3 = u32_big_endian(i3.registers, 0) * 0.001
             except Exception as e:
                 defa_ok = False
-                _LOGGER.warning("DEFA read failed (will still publish iHomeManager data): %s", e)
+                _LOGGER.warning(
+                    "DEFA read failed (will still publish iHomeManager data): %s", e
+                )
 
             # --------------------------
             # Compute currents & targets
@@ -210,7 +212,6 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
 
             # --------------------------
             # DEFA writes (best-effort)
-            # If DEFA is not OK, we skip writes to avoid blocking all sensor updates
             # --------------------------
             if defa_ok:
                 try:
@@ -222,12 +223,14 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
                     lo = ma & 0xFFFF
                     await self._defa.write_registers(2000, [hi, lo])
                 except Exception as e:
-                    _LOGGER.warning("DEFA write failed (continuing with sensor updates): %s", e)
+                    _LOGGER.warning(
+                        "DEFA write failed (continuing with sensor updates): %s", e
+                    )
 
             # --------------------------
             # Return coordinator data
             # --------------------------
-            data = {
+            data: dict = {
                 "v_l1": v_l1,
                 "v_l2": v_l2,
                 "v_l3": v_l3,
@@ -246,18 +249,17 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
                 "applied": applied,
             }
 
-            # Optional extra sensors
+            # Optional extra sensors (key names with underscore)
             if total_purchased_power is not None:
                 data["total_purchased_power"] = total_purchased_power
             if total_feed_in_power is not None:
-                data["total_feed-in_power"] = total_feed_in_power
+                data["total_feed_in_power"] = total_feed_in_power
             if total_active_power is not None:
                 data["total_active_power"] = total_active_power
 
             return data
 
         except Exception as err:
-            # Log stacktrace for quick diagnosis
             _LOGGER.exception("Coordinator refresh failed")
             raise UpdateFailed(err) from err
 
