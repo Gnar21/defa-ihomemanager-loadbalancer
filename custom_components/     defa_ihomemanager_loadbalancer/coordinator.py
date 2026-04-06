@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 import logging
-_LOGGER = logging.getLogger(__name__)
 import time
 
 from homeassistant.core import HomeAssistant
