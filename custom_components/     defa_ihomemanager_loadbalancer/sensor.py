@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorEntity, SensorDeviceClass, SensorStateClass
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
@@ -24,7 +24,7 @@ SENSORS = [
 
     # Extra sensors
     ("total_purchased_power", "Total Purchased power", "kWh"),
-    ("total_feed_in_power", "Total feed-in power", "kWh"),  # <-- FIX: underscore, not hyphen
+    ("total_feed_in_power", "Total feed-in power", "kWh"),
     ("total_active_power", "Total active power", "kW"),
 ]
 
@@ -44,15 +44,22 @@ class LBSensor(CoordinatorEntity, SensorEntity):
         self._attr_unique_id = f"{entry_id}_{key}"
         self._attr_native_unit_of_measurement = unit
 
+        # ✅ Rätt klassning för energitotaler (kWh)
+        # device_class=energy + state_class=total_increasing ger long-term statistics och “meter”-beteende. [1](https://www.defa.com/what-is-full-dynamic-load-balancing/)[2](https://www.defa.com/support/defa-balancer/)[3](https://hacs.xyz/docs/use/download/download/)
+        if key in ("total_purchased_power", "total_feed_in_power"):
+            self._attr_device_class = SensorDeviceClass.ENERGY
+            self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+
     @property
     def native_value(self):
-        # coordinator.data can be None until first refresh completes
         data = self.coordinator.data or {}
         val = data.get(self._key)
 
-        # If missing, return None -> HA will show unknown
         if val is None:
             return None
 
-        # Pretty rounding for floats
+        # ⚠️ Avrunda inte TOTAL_INCREASING, för att undvika falska “minskningar” p.g.a. rounding. [2](https://www.defa.com/support/defa-balancer/)[5](https://kubernetes-sigs.github.io/aws-load-balancer-controller/v2.1/deploy/installation/)
+        if self._key in ("total_purchased_power", "total_feed_in_power"):
+            return float(val)
+
         return round(val, 3) if isinstance(val, float) else val
