@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
+
+_LOGGER = logging.getLogger(__name__)
 
 SENSORS = [
     ("grid_i_l1", "Grid current L1", "A"),
@@ -21,17 +24,19 @@ SENSORS = [
 
     # Extra sensors
     ("total_purchased_power", "Total Purchased power", "kWh"),
-    ("total_feed-in_power", "Total feed-in power", "kWh"),
+    ("total_feed_in_power", "Total feed-in power", "kWh"),  # <-- FIX: underscore, not hyphen
     ("total_active_power", "Total active power", "kW"),
 ]
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    async_add_entities([LBsensor(coordinator, entry.entry_id, k, n, u) for k, n, u in SENSORS])
+    async_add_entities(
+        [LBSensor(coordinator, entry.entry_id, k, n, u) for k, n, u in SENSORS]
+    )
 
 
-class LBsensor(CoordinatorEntity, SensorEntity):
+class LBSensor(CoordinatorEntity, SensorEntity):
     def __init__(self, coordinator, entry_id: str, key: str, name: str, unit: str):
         super().__init__(coordinator)
         self._key = key
@@ -41,7 +46,13 @@ class LBsensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self):
-        val = self.coordinator.data.get(self._key)
+        # coordinator.data can be None until first refresh completes
+        data = self.coordinator.data or {}
+        val = data.get(self._key)
+
+        # If missing, return None -> HA will show unknown
         if val is None:
             return None
+
+        # Pretty rounding for floats
         return round(val, 3) if isinstance(val, float) else val
