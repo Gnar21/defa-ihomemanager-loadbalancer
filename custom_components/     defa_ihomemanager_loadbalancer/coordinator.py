@@ -41,6 +41,18 @@ def _ensure_ok(resp, label: str) -> None:
         raise UpdateFailed(f"{label}: missing registers attribute ({resp})")
 
 
+def _zero_deadband(x: float, band: float) -> float:
+    """Return 0.0 when value is close to 0 (to reduce flapping at import/export boundary)."""
+    return 0.0 if abs(x) < band else x
+
+
+def _clamp(x: float, low: float, high: float) -> float:
+    """Clamp float to a range."""
+    if x != x:  # NaN
+        return 0.0
+    return max(low, min(high, x))
+
+
 @dataclass
 class Settings:
     fuse_a: float = DEFAULT_FUSE_A
@@ -60,7 +72,7 @@ class Settings:
 class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
     """Poll iHomeManager + DEFA and apply limit to DEFA.
 
-    DataUpdateCoordinator is the recommended HA pattern for polling shared data.
+    Uses Home Assistant DataUpdateCoordinator pattern. [3](https://developers.home-assistant.io/docs/integration_fetching_data/)[2](https://developers.home-assistant.io/blog/2024/08/05/coordinator_async_setup/)
     """
 
     def __init__(
@@ -70,6 +82,7 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
         defa: AsyncModbusEndpointClient,
         settings: Settings,
     ) -> None:
+        # DataUpdateCoordinator requires logger in newer HA versions. [1](https://github.com/home-assistant/core/blob/dev/homeassistant/helpers/update_coordinator.py)[2](https://developers.home-assistant.io/blog/2024/08/05/coordinator_async_setup/)
         super().__init__(
             hass=hass,
             logger=_LOGGER,
@@ -106,26 +119,37 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
             v_l3 = u16(v_regs.registers, 2) * 0.1
             v_avg = max((v_l1 + v_l2 + v_l3) / 3.0, 1.0)
 
-            # Phase active power U32 W: 8559-8564 -> 8558/8560/8562 (2 regs each)
+            # Phase active power:
+            # Phase A: 8559~8560 -> address 8558 (2 regs)
+            # Phase B: 8561~8562 -> address 8560 (2 regs)
+            # Phase C: 8563~8564 -> address 8562 (2 regs)
             p1 = await self._ihm.read_input_registers(8558, 2)
-            _ensure_ok(p1, "iHomeManager phase power L1 @8558 count=2")
+            _ensure_ok(p1, "iHomeManager phase power A @8558 count=2")
             p2 = await self._ihm.read_input_registers(8560, 2)
-            _ensure_ok(p2, "iHomeManager phase power L2 @8560 count=2")
+            _ensure_ok(p2, "iHomeManager phase power B @8560 count=2")
             p3 = await self._ihm.read_input_registers(8562, 2)
-            _ensure_ok(p3, "iHomeManager phase power L3 @8562 count=2")
+            _ensure_ok(p3, "iHomeManager phase power C @8562 count=2")
 
-            p_l1 = float(u32_hybrid_low_word_first(p1.registers, 0))
-            p_l2 = float(u32_hybrid_low_word_first(p2.registers, 0))
-            p_l3 = float(u32_hybrid_low_word_first(p3.registers, 0))
+            # IMPORTANT:
+            # Protocol states negative numbers are complements (two's complement).
+            # That means phase power can be negative at export -> decode as signed 32-bit.
+            p_a = float(s32_hybrid_low_word_first(p1.registers, 0))
+            p_b = float(s32_hybrid_low_word_first(p2.registers, 0))
+            p_c = float(s32_hybrid_low_word_first(p3.registers, 0))
 
-            # Grid meter active power S32, 0.01 kW: 8157 -> address 8156
+            # Small deadband around 0W to reduce flapping at import/export boundary.
+            p_a = _zero_deadband(p_a, 50.0)
+            p_b = _zero_deadband(p_b, 50.0)
+            p_c = _zero_deadband(p_c, 50.0)
+
+            # Grid meter active power (total) S32, 0.01 kW: 8157 -> address 8156 (2 regs)
             gp = await self._ihm.read_input_registers(8156, 2)
             _ensure_ok(gp, "iHomeManager grid power @8156 count=2")
             grid_kw = s32_hybrid_low_word_first(gp.registers, 0) * 0.01
             grid_kw *= int(self.settings.grid_power_sign)
 
             # --------------------------
-            # Extra iHomeManager sensors (optional, but we try)
+            # Extra iHomeManager sensors (optional)
             # --------------------------
             total_purchased_power = None
             total_feed_in_power = None
@@ -139,6 +163,7 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
                 ta = await self._ihm.read_input_registers(8156, 2)
                 _ensure_ok(ta, "iHomeManager Total active power @8156 count=2")
 
+                # Keep your previous scaling (as you used before).
                 total_purchased_power = u32_hybrid_low_word_first(tp.registers, 0) * 0.1
                 total_feed_in_power = u32_hybrid_low_word_first(tf.registers, 0) * 0.1
                 total_active_power = s32_hybrid_low_word_first(ta.registers, 0) * 0.01
@@ -161,22 +186,25 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
                 i3 = await self._defa.read_input_registers(299, 2)
                 _ensure_ok(i3, "DEFA current L3 @299 count=2")
 
+                # DEFA currents are read as big-endian uint32 * 0.001 A (as you had).
                 ev_i_l1 = u32_big_endian(i1.registers, 0) * 0.001
                 ev_i_l2 = u32_big_endian(i2.registers, 0) * 0.001
                 ev_i_l3 = u32_big_endian(i3.registers, 0) * 0.001
             except Exception as e:
                 defa_ok = False
-                _LOGGER.warning(
-                    "DEFA read failed (will still publish iHomeManager data): %s", e
-                )
+                _LOGGER.warning("DEFA read failed (will still publish iHomeManager data): %s", e)
 
             # --------------------------
-            # Compute currents & targets
+            # Compute derived currents
             # --------------------------
-            grid_i_l1 = p_l1 / max(v_l1, 1.0)
-            grid_i_l2 = p_l2 / max(v_l2, 1.0)
-            grid_i_l3 = p_l3 / max(v_l3, 1.0)
+            # Convert phase active power (W) to approximate current (A): I ~= P / V
+            # Clamp to avoid any unrealistic spikes affecting control.
+            grid_i_l1 = _clamp(p_a / max(v_l1, 1.0), -200.0, 200.0)
+            grid_i_l2 = _clamp(p_b / max(v_l2, 1.0), -200.0, 200.0)
+            grid_i_l3 = _clamp(p_c / max(v_l3, 1.0), -200.0, 200.0)
 
+            # Other load per phase (exclude EV current). If grid current is negative (export),
+            # treat "other load" as 0 for headroom purposes.
             other_l1 = max(grid_i_l1 - ev_i_l1, 0.0)
             other_l2 = max(grid_i_l2 - ev_i_l2, 0.0)
             other_l3 = max(grid_i_l3 - ev_i_l3, 0.0)
@@ -223,9 +251,7 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
                     lo = ma & 0xFFFF
                     await self._defa.write_registers(2000, [hi, lo])
                 except Exception as e:
-                    _LOGGER.warning(
-                        "DEFA write failed (continuing with sensor updates): %s", e
-                    )
+                    _LOGGER.warning("DEFA write failed (continuing with sensor updates): %s", e)
 
             # --------------------------
             # Return coordinator data
@@ -234,14 +260,23 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
                 "v_l1": v_l1,
                 "v_l2": v_l2,
                 "v_l3": v_l3,
+
+                # Phase power (signed W)
+                "p_l1": p_a,
+                "p_l2": p_b,
+                "p_l3": p_c,
+
                 "grid_kw": grid_kw,
                 "export_kw": export_kw,
+
                 "grid_i_l1": grid_i_l1,
                 "grid_i_l2": grid_i_l2,
                 "grid_i_l3": grid_i_l3,
+
                 "ev_i_l1": ev_i_l1,
                 "ev_i_l2": ev_i_l2,
                 "ev_i_l3": ev_i_l3,
+
                 "headroom": headroom,
                 "target_normal": normal_target,
                 "target_eco": eco_target,
@@ -249,7 +284,7 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
                 "applied": applied,
             }
 
-            # Optional extra sensors (key names with underscore)
+            # Optional extra sensors (underscore keys)
             if total_purchased_power is not None:
                 data["total_purchased_power"] = total_purchased_power
             if total_feed_in_power is not None:
