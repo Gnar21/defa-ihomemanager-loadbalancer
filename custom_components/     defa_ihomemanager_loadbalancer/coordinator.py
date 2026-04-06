@@ -70,12 +70,12 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
         defa: AsyncModbusEndpointClient,
         settings: Settings,
     ) -> None:
-        super().__init__(
-            hass,
-            _LOGGER,  # required logger argument [1](https://github.com/NoTwistedHere/Random-Roblox-Utils/blob/main/Loadstrings.md)
-            name="DEFA+iHomeManager Load Balancer",
-            update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
-        )
+       super().__init__(
+    hass=hass,
+    logger=_LOGGER,
+    name="DEFA+iHomeManager Load Balancer",
+    update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
+)
         self._ihm = ihm
         self._defa = defa
         self.settings = settings
