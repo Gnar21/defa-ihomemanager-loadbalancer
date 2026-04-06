@@ -42,7 +42,7 @@ def _ensure_ok(resp, label: str) -> None:
 
 
 def _zero_deadband(x: float, band: float) -> float:
-    """Return 0.0 when value is close to 0 (to reduce flapping at import/export boundary)."""
+    """Return 0.0 when value is close to 0 (reduce flapping at import/export boundary)."""
     return 0.0 if abs(x) < band else x
 
 
@@ -55,25 +55,36 @@ def _clamp(x: float, low: float, high: float) -> float:
 
 @dataclass
 class Settings:
+    # Electrical limits
     fuse_a: float = DEFAULT_FUSE_A
     margin_a: float = DEFAULT_MARGIN_A
     normal_max_a: float = DEFAULT_NORMAL_MAX_A
     min_a: float = DEFAULT_MIN_A
 
+    # Eco behaviour
     eco_grid_limit_a: float = DEFAULT_ECO_GRID_LIMIT_A
     grid_power_sign: int = DEFAULT_GRID_POWER_SIGN
     eco_mode: bool = False
 
+    # Legacy (kept for backward compatibility – not used if profile values below are set)
     deadband_a: float = DEFAULT_DEADBAND_A
     ramp_a_per_min: float = DEFAULT_RAMP_A_PER_MIN
     min_up_interval_s: int = DEFAULT_MIN_UP_INTERVAL_S
 
+    # NEW: separate profiles (recommended defaults)
+    # Eco: stable and smooth
+    eco_deadband_a: float = 0.6
+    eco_ramp_a_per_min: float = 4.0
+    eco_min_up_interval_s: int = 10
+
+    # Normal: faster response
+    normal_deadband_a: float = 0.3
+    normal_ramp_a_per_min: float = 12.0
+    normal_min_up_interval_s: int = 5
+
 
 class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
-    """Poll iHomeManager + DEFA and apply limit to DEFA.
-
-    Uses Home Assistant DataUpdateCoordinator pattern. [3](https://developers.home-assistant.io/docs/integration_fetching_data/)[2](https://developers.home-assistant.io/blog/2024/08/05/coordinator_async_setup/)
-    """
+    """Poll iHomeManager + DEFA and apply limit to DEFA."""
 
     def __init__(
         self,
@@ -82,7 +93,6 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
         defa: AsyncModbusEndpointClient,
         settings: Settings,
     ) -> None:
-        # DataUpdateCoordinator requires logger in newer HA versions. [1](https://github.com/home-assistant/core/blob/dev/homeassistant/helpers/update_coordinator.py)[2](https://developers.home-assistant.io/blog/2024/08/05/coordinator_async_setup/)
         super().__init__(
             hass=hass,
             logger=_LOGGER,
@@ -102,11 +112,7 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
         await self._defa.async_close()
 
     async def _async_update_data(self) -> dict:
-        """Fetch data and (best-effort) apply control.
-
-        If DEFA reads/writes fail, we still return iHomeManager data so entities
-        do not get stuck as unknown.
-        """
+        """Fetch data and (best-effort) apply control."""
         try:
             # --------------------------
             # iHomeManager reads (required)
@@ -131,13 +137,13 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
             _ensure_ok(p3, "iHomeManager phase power C @8562 count=2")
 
             # IMPORTANT:
-            # Protocol states negative numbers are complements (two's complement).
+            # Protocol states negative numbers are transmitted as complements (two's complement).
             # That means phase power can be negative at export -> decode as signed 32-bit.
             p_a = float(s32_hybrid_low_word_first(p1.registers, 0))
             p_b = float(s32_hybrid_low_word_first(p2.registers, 0))
             p_c = float(s32_hybrid_low_word_first(p3.registers, 0))
 
-            # Small deadband around 0W to reduce flapping at import/export boundary.
+            # Deadband around 0W to reduce flapping at import/export boundary.
             p_a = _zero_deadband(p_a, 50.0)
             p_b = _zero_deadband(p_b, 50.0)
             p_c = _zero_deadband(p_c, 50.0)
@@ -186,7 +192,7 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
                 i3 = await self._defa.read_input_registers(299, 2)
                 _ensure_ok(i3, "DEFA current L3 @299 count=2")
 
-                # DEFA currents are read as big-endian uint32 * 0.001 A (as you had).
+                # DEFA currents: big-endian uint32 * 0.001 A
                 ev_i_l1 = u32_big_endian(i1.registers, 0) * 0.001
                 ev_i_l2 = u32_big_endian(i2.registers, 0) * 0.001
                 ev_i_l3 = u32_big_endian(i3.registers, 0) * 0.001
@@ -203,8 +209,8 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
             grid_i_l2 = _clamp(p_b / max(v_l2, 1.0), -200.0, 200.0)
             grid_i_l3 = _clamp(p_c / max(v_l3, 1.0), -200.0, 200.0)
 
-            # Other load per phase (exclude EV current). If grid current is negative (export),
-            # treat "other load" as 0 for headroom purposes.
+            # Other load per phase (exclude EV current).
+            # If grid current is negative (export), treat "other load" as 0 for headroom purposes.
             other_l1 = max(grid_i_l1 - ev_i_l1, 0.0)
             other_l2 = max(grid_i_l2 - ev_i_l2, 0.0)
             other_l3 = max(grid_i_l3 - ev_i_l3, 0.0)
@@ -284,7 +290,6 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
                 "applied": applied,
             }
 
-            # Optional extra sensors (underscore keys)
             if total_purchased_power is not None:
                 data["total_purchased_power"] = total_purchased_power
             if total_feed_in_power is not None:
@@ -298,29 +303,54 @@ class LoadBalancerCoordinator(DataUpdateCoordinator[dict]):
             _LOGGER.exception("Coordinator refresh failed")
             raise UpdateFailed(err) from err
 
+    def _current_profile(self) -> tuple[float, float, int]:
+        """Return (deadband_a, ramp_a_per_min, min_up_interval_s) for current mode."""
+        if bool(self.settings.eco_mode):
+            deadband = float(self.settings.eco_deadband_a)
+            ramp = float(self.settings.eco_ramp_a_per_min)
+            min_up = int(self.settings.eco_min_up_interval_s)
+        else:
+            deadband = float(self.settings.normal_deadband_a)
+            ramp = float(self.settings.normal_ramp_a_per_min)
+            min_up = int(self.settings.normal_min_up_interval_s)
+
+        # Safety fallback if someone sets silly values:
+        deadband = _clamp(deadband, 0.0, 5.0)
+        ramp = _clamp(ramp, 0.1, 100.0)
+        min_up = max(0, min_up)
+        return deadband, ramp, min_up
+
     def _apply_antifladder(self, desired: float) -> float:
-        deadband = float(self.settings.deadband_a)
-        ramp_per_min = float(self.settings.ramp_a_per_min)
-        min_up_s = int(self.settings.min_up_interval_s)
+        """Apply deadband + ramp-up limits. Ramp-down is immediate."""
+        deadband, ramp_per_min, min_up_s = self._current_profile()
 
         now = time.time()
         current = self._last_sent_a
         diff = desired - current
 
+        # Within deadband: keep current
         if abs(diff) < deadband:
             return current
 
-        # Down: immediate
+        # Down: immediate (safe, avoids fuse trips and oscillations)
         if diff < 0:
             self._last_sent_a = max(desired, 0.0)
             return self._last_sent_a
 
-        # Up: rate limit
+        # Up: rate-limit how often we increase
         if (now - self._last_up_ts) < min_up_s:
             return current
 
-        # Up: ramp assuming DEFAULT_SCAN_INTERVAL=10s => ~6 steps/min
-        step = max(ramp_per_min / 6.0, 0.1)
+        # Up: ramp based on real update interval
+        interval_s = float(DEFAULT_SCAN_INTERVAL)
+        try:
+            if self.update_interval is not None:
+                interval_s = float(self.update_interval.total_seconds())
+        except Exception:
+            interval_s = float(DEFAULT_SCAN_INTERVAL)
+
+        # ramp_per_min [A/min] => step [A] per update tick
+        step = max((ramp_per_min * interval_s) / 60.0, 0.1)
         new_val = min(current + step, desired)
 
         self._last_sent_a = new_val
